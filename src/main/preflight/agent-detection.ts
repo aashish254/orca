@@ -31,6 +31,7 @@ import { hydrateShellPathForAgentDetection } from '../ipc/agent-detection-shell-
 import {
   execCommandInWslOrThrow,
   execLocalPreflightCommandOrThrow,
+  findRunnableLocalCommand,
   isCommandAvailable,
   isCommandOnPath,
   shellQuote
@@ -126,20 +127,25 @@ function uniqueAgentIds(ids: Iterable<string>): string[] {
   return [...new Set(ids)]
 }
 
+/** A CLI verdict and, on the local path, the exact copy that produced it. */
+type CommandRuntime = { installed: boolean; wslTarget?: WslPreflightTarget; binary?: string }
+
 async function detectCommandRuntime(
   command: string,
   context?: PreflightRuntimeContext
-): Promise<{ installed: boolean; wslTarget?: WslPreflightTarget }> {
+): Promise<CommandRuntime> {
   const wslTarget = getPreflightWslTarget(context)
   if (wslTarget) {
     return (await isCommandAvailable(command, wslTarget))
       ? { installed: true, wslTarget }
       : { installed: false }
   }
-  if (await isCommandAvailable(command)) {
-    return { installed: true }
-  }
-  return { installed: false }
+  // Why the binary travels with the verdict: the `auth status` probe that follows
+  // has to run the same copy that answered `--version`. Left to resolve the bare
+  // name through PATH again it would re-pick the dead shim, moving the card's lie
+  // from "not installed" to "installed, not authenticated" (#22975).
+  const binary = await findRunnableLocalCommand(command)
+  return binary ? { installed: true, binary } : { installed: false }
 }
 
 export async function detectInstalledAgents(context?: PreflightRuntimeContext): Promise<string[]> {
@@ -253,11 +259,15 @@ export async function detectRemoteAgents(args: { connectionId: string }): Promis
   return uniqueAgentIds(result.agents)
 }
 
-async function isGhAuthenticated(wslTarget?: WslPreflightTarget): Promise<boolean> {
+// Why the probe object rather than the bare command name: on the local path
+// `binary` is the copy that just passed `--version`, which on a shim-shadowed
+// host is not what PATH would resolve (#22975). WSL has no `binary` — the guest
+// resolves the name inside the distro, where Orca's PATH ordering cannot apply.
+async function isGhAuthenticated(probe: CommandRuntime): Promise<boolean> {
   try {
-    await (wslTarget
-      ? execCommandInWslOrThrow(wslTarget, `${shellQuote('gh')} auth status`)
-      : execLocalPreflightCommandOrThrow('gh', ['auth', 'status']))
+    await (probe.wslTarget
+      ? execCommandInWslOrThrow(probe.wslTarget, `${shellQuote('gh')} auth status`)
+      : execLocalPreflightCommandOrThrow(probe.binary ?? 'gh', ['auth', 'status']))
     // Why: for plain-text `gh auth status`, exit 0 means gh did not detect any
     // authentication issues for the checked hosts/accounts.
     return true
@@ -274,11 +284,11 @@ async function isGhAuthenticated(wslTarget?: WslPreflightTarget): Promise<boolea
 
 // Why: parallel to isGhAuthenticated for the glab CLI. glab writes auth
 // status to stderr in some versions and stdout in others; check both.
-async function isGlabAuthenticated(wslTarget?: WslPreflightTarget): Promise<boolean> {
+async function isGlabAuthenticated(probe: CommandRuntime): Promise<boolean> {
   try {
-    await (wslTarget
-      ? execCommandInWslOrThrow(wslTarget, `${shellQuote('glab')} auth status`)
-      : execLocalPreflightCommandOrThrow('glab', ['auth', 'status']))
+    await (probe.wslTarget
+      ? execCommandInWslOrThrow(probe.wslTarget, `${shellQuote('glab')} auth status`)
+      : execLocalPreflightCommandOrThrow(probe.binary ?? 'glab', ['auth', 'status']))
     return true
   } catch (error) {
     const stdout = (error as { stdout?: string }).stdout ?? ''
@@ -380,8 +390,8 @@ async function executePreflightCheck(
   ])
 
   const [ghAuthenticated, glabAuthenticated, bitbucket, azureDevOps, gitea] = await Promise.all([
-    ghProbe.installed ? isGhAuthenticated(ghProbe.wslTarget) : Promise.resolve(false),
-    glabProbe.installed ? isGlabAuthenticated(glabProbe.wslTarget) : Promise.resolve(false),
+    ghProbe.installed ? isGhAuthenticated(ghProbe) : Promise.resolve(false),
+    glabProbe.installed ? isGlabAuthenticated(glabProbe) : Promise.resolve(false),
     getBitbucketAuthStatus(),
     getAzureDevOpsAuthStatus(),
     getGiteaAuthStatus()

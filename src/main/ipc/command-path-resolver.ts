@@ -63,12 +63,15 @@ async function isExecutableFile(candidate: string, isWin: boolean): Promise<bool
  * which(1)/where.exe lookup, including the current preflight quirk that only
  * counts matches which resolve to an ABSOLUTE path (so relative PATH entries
  * and relative command paths stay not-found, exactly as before).
+ *
+ * Stops at the first match; use {@link listLocalCommandPaths} when the rest of
+ * the PATH matters too.
  */
 export async function isCommandOnLocalPath(
   command: string,
   options: ResolveCommandOptions = {}
 ): Promise<boolean> {
-  return (await resolveCommandOnLocalPath(command, options)) !== null
+  return (await findLocalCommandPaths(command, options, true)).length > 0
 }
 
 /** The absolute path `isCommandOnLocalPath` found, or null. */
@@ -76,8 +79,32 @@ export async function resolveCommandOnLocalPath(
   command: string,
   options: ResolveCommandOptions = {}
 ): Promise<string | null> {
+  return (await findLocalCommandPaths(command, options, true))[0] ?? null
+}
+
+/**
+ * Every ABSOLUTE PATH match for `command`, in the order a shell would try them.
+ *
+ * Why the full list and not just the winner: a version-manager shim
+ * (`~/.asdf/shims/gh`) passes the fs executable check below as readily as the
+ * real binary it shadows, so a winner-only lookup can only ever report the
+ * shim. Callers that need to know whether the winner actually runs have to be
+ * handed the candidates behind it (#22975).
+ */
+export async function listLocalCommandPaths(
+  command: string,
+  options: ResolveCommandOptions = {}
+): Promise<string[]> {
+  return findLocalCommandPaths(command, options, false)
+}
+
+async function findLocalCommandPaths(
+  command: string,
+  options: ResolveCommandOptions,
+  stopAtFirst: boolean
+): Promise<string[]> {
   if (!command) {
-    return null
+    return []
   }
   const platform = options.platform ?? process.platform
   const env = options.env ?? process.env
@@ -95,6 +122,8 @@ export async function resolveCommandOnLocalPath(
   const searchDirs = hasPathSeparator ? [''] : isWin ? [cwd, ...pathDirs] : pathDirs
   const extensions = isWin ? getWindowsExtensions(env, command) : ['']
 
+  const found: string[] = []
+  const seen = new Set<string>()
   for (const dir of searchDirs) {
     for (const ext of extensions) {
       // Why: forward-slash joins so candidates are statable on every platform
@@ -102,13 +131,17 @@ export async function resolveCommandOnLocalPath(
       const candidate = path.posix.join(dir, command) + ext
       // Why: preserve the prior `.some(line => path.isAbsolute(line))` filter
       // over where/which stdout — only absolute resolutions count.
-      if (!isAbsolute(candidate)) {
+      if (!isAbsolute(candidate) || seen.has(candidate)) {
         continue
       }
+      seen.add(candidate)
       if (await isExecutableFile(candidate, isWin)) {
-        return candidate
+        found.push(candidate)
+        if (stopAtFirst) {
+          return found
+        }
       }
     }
   }
-  return null
+  return found
 }

@@ -13,6 +13,7 @@ const {
   getGiteaAuthStatusMock,
   resolveCliCommandsMock,
   isCommandOnLocalPathMock,
+  listLocalCommandPathsMock,
   mergePersistedWindowsPathAsyncMock,
   mergePersistedWindowsPathMock
 } = vi.hoisted(() => ({
@@ -28,6 +29,7 @@ const {
   getGiteaAuthStatusMock: vi.fn(),
   resolveCliCommandsMock: vi.fn(),
   isCommandOnLocalPathMock: vi.fn(),
+  listLocalCommandPathsMock: vi.fn(),
   mergePersistedWindowsPathAsyncMock: vi.fn(),
   mergePersistedWindowsPathMock: vi.fn()
 }))
@@ -64,7 +66,8 @@ vi.mock('../../shared/node-cli-command-resolution', () => ({
 // These tests express "which commands are on PATH" via the where/which mock,
 // so route the resolver through that same mock to preserve their intent.
 vi.mock('./command-path-resolver', () => ({
-  isCommandOnLocalPath: isCommandOnLocalPathMock
+  isCommandOnLocalPath: isCommandOnLocalPathMock,
+  listLocalCommandPaths: listLocalCommandPathsMock
 }))
 
 vi.mock('../pty/windows-environment-path', () => ({
@@ -115,6 +118,7 @@ describe('preflight', () => {
         getGiteaAuthStatusMock,
         resolveCliCommandsMock,
         isCommandOnLocalPathMock,
+        listLocalCommandPathsMock,
         mergePersistedWindowsPathAsyncMock,
         mergePersistedWindowsPathMock
       },
@@ -186,6 +190,93 @@ describe('preflight', () => {
     const status = await runPreflightCheck()
 
     expect(status.gh).toEqual({ installed: true, authenticated: true })
+  })
+
+  // Why (#22975): these two cases key the spawn mock on (command, args) instead
+  // of call order, because the fallback probes exactly which copy runs is the
+  // behaviour under test — and `gh auth status` runs in parallel with
+  // `glab auth status`, so a fixed sequence would not be the real one.
+  it('authenticates the gh copy that actually ran, not the shim PATH chose', async () => {
+    const shim = '/Users/octocat/.asdf/shims/gh'
+    const working = '/opt/homebrew/bin/gh'
+    const glabShim = '/Users/octocat/.asdf/shims/glab'
+    const glabWorking = '/usr/local/bin/glab'
+    const shims = new Set([shim, glabShim])
+    listLocalCommandPathsMock.mockImplementation(async (command: string) => {
+      if (command === 'gh') {
+        return [shim, working]
+      }
+      return command === 'glab' ? [glabShim, glabWorking] : []
+    })
+    execFileAsyncMock.mockImplementation(async (command: string, args: string[]) => {
+      if (shims.has(command)) {
+        // The measured asdf failure: exit status 126, not ENOENT.
+        throw Object.assign(new Error('spawn failed'), { code: 126 })
+      }
+      const auth = args[0] === 'auth'
+      if (command === working) {
+        return { stdout: auth ? 'github.com\n  - Active account: true\n' : 'gh version 2.6.0\n' }
+      }
+      if (command === glabWorking) {
+        return { stdout: auth ? 'Logged in to gitlab.com\n' : 'glab version 1.92.1\n' }
+      }
+      if (command === 'git') {
+        return { stdout: 'git version 2.0.0\n' }
+      }
+      throw new Error(`unexpected command ${command}`)
+    })
+
+    const status = await runPreflightCheck()
+
+    expect(status).toMatchObject({
+      gh: { installed: true, authenticated: true },
+      glab: { installed: true, authenticated: true }
+    })
+    // Why the pair: `--version` proving a copy is worthless if `auth status`
+    // then re-resolves the bare name and re-picks the shim (#22975).
+    for (const [cli, copy] of [
+      ['gh', working],
+      ['glab', glabWorking]
+    ]) {
+      expect(execFileAsyncMock).toHaveBeenCalledWith(copy, ['auth', 'status'], {
+        encoding: 'utf-8',
+        timeout: 5000,
+        windowsHide: true
+      })
+      expect(execFileAsyncMock).not.toHaveBeenCalledWith(cli, ['auth', 'status'], {
+        encoding: 'utf-8',
+        timeout: 5000,
+        windowsHide: true
+      })
+    }
+  })
+
+  it('marks gh not installed when no copy PATH offers can run', async () => {
+    const doomed = ['/Users/octocat/.asdf/shims/gh', '/Users/octocat/.local/bin/gh']
+    listLocalCommandPathsMock.mockImplementation(async (command: string) =>
+      command === 'gh' ? doomed : []
+    )
+    execFileAsyncMock.mockImplementation(async (command: string, args: string[]) => {
+      if (doomed.includes(command)) {
+        throw Object.assign(new Error('spawn failed'), { code: 126 })
+      }
+      if (command === 'git') {
+        return { stdout: 'git version 2.0.0\n' }
+      }
+      if (command === 'glab') {
+        return {
+          stdout: args[0] === 'auth' ? 'Logged in to gitlab.com\n' : 'glab version 1.92.1\n'
+        }
+      }
+      throw new Error(`unexpected command ${command}`)
+    })
+
+    const status = await runPreflightCheck()
+
+    expect(status.gh).toEqual({ installed: false, authenticated: false })
+    // Why 5 and not 6: git, the two doomed gh copies, and glab --version all
+    // spawn, so the only way to reach 6 is a gh auth probe.
+    expect(execFileAsyncMock).toHaveBeenCalledTimes(5)
   })
 
   it('marks glab as not installed when `glab --version` fails', async () => {
