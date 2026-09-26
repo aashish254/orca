@@ -120,9 +120,25 @@ export function resetDevParentShutdownRequestForTests(): void {
   devParentShutdownRequested = false
 }
 
+/** `homedir()` throws ERR_SYSTEM_ERROR where the account database has no entry (a mapped `docker run --user`); the seed must degrade to no `~` entries instead. */
+function resolveAccountHome(): string | undefined {
+  try {
+    return homedir() || undefined
+  } catch (error) {
+    console.warn('[startup] Could not resolve the account directory:', error)
+    return undefined
+  }
+}
+
 export function patchPackagedProcessPath(): void {
   if (!app.isPackaged) {
     return
+  }
+
+  // A packaged launch can inherit no HOME, which drops every `~` entry from the seed and leaves a CLI blind to its own config (#23214). POSIX only: Windows carries the directory in USERPROFILE.
+  const accountHome = resolveAccountHome()
+  if (process.platform !== 'win32' && !process.env.HOME && accountHome) {
+    process.env.HOME = accountHome
   }
 
   const home = process.env.HOME ?? ''
@@ -145,6 +161,9 @@ export function patchPackagedProcessPath(): void {
 
     appendPaths.push('/nix/var/nix/profiles/default/bin')
 
+    // A launch from a compositor keybinding or unit inherits no PATH, so this seed is the whole PATH and a package-manager CLI (`gh` at /usr/bin/gh, #23214) was unreachable. Placed after the install-site dirs, which the #18234 prepends still outrank.
+    appendPaths.push('/usr/bin', '/bin')
+
     if (home) {
       appendPaths.push(
         join(home, 'bin'),
@@ -159,7 +178,7 @@ export function patchPackagedProcessPath(): void {
   }
 
   // env-node shebangs require runtime shims; exclude generic user bins so arbitrary wrappers cannot shadow system tools.
-  for (const path of getVersionManagerBinPaths()) {
+  for (const path of getVersionManagerBinPaths({ homePath: accountHome ?? home })) {
     if (isWindowsFnmDefaultAliasDir(path)) {
       appendPaths.push(path)
     } else if (!isGenericUserBinDir(path)) {
