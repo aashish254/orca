@@ -1,7 +1,7 @@
 import { app } from 'electron'
 import { mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, posix, resolve, win32 } from 'node:path'
 import { getVersionManagerBinPaths } from '../codex-cli/command'
 import { getMainE2EConfig } from '../e2e-config'
 import { DISABLED_CHROMIUM_FEATURES } from './disabled-chromium-features'
@@ -139,6 +139,26 @@ function resolveAccountHome(): string | undefined {
   }
 }
 
+/**
+ * The account directory only when it can name a directory.
+ *
+ * Why a relative path counts as no directory: every `~`-derived seed entry below is
+ * a `join(home, …)`, so an empty home yields bare relative names — `.volta/bin`,
+ * `.asdf/shims`, `.local/bin`. A relative PATH entry resolves against the cwd of
+ * *each* spawn rather than against any single process, so a worktree that plants an
+ * executable under one of those names is what runs when Orca spawns a command with
+ * that worktree as its cwd (CWE-426). Same rule `resolveAbsoluteDirOverride` applies
+ * to env directory overrides (#13082).
+ * Why the platform-selected test: `path.isAbsolute` follows the *host*, and this
+ * function's Windows shape is `C:\Users\…`, which POSIX reads as relative — so a
+ * host check would silently drop the user-local bins from every Windows launch that
+ * happened to be tested on a Linux runner.
+ */
+function usableSeedHome(candidate: string): string {
+  const isAbsolutePath = process.platform === 'win32' ? win32.isAbsolute : posix.isAbsolute
+  return isAbsolutePath(candidate) ? candidate : ''
+}
+
 export function patchPackagedProcessPath(): void {
   if (!app.isPackaged) {
     return
@@ -155,7 +175,14 @@ export function patchPackagedProcessPath(): void {
     process.env.HOME = accountHome
   }
 
-  const home = process.env.HOME ?? ''
+  const inheritedHome = process.env.HOME ?? ''
+  // Why both homes go through `usableSeedHome`: the user-bin block below and the
+  // version-manager list are the two `~`-derived parts of this seed, and on the host
+  // shape #23214 reports — no passwd entry, no `HOME` — each of them would otherwise
+  // emit relative entries. `accountHome ?? inheritedHome` rather than one or the
+  // other because Windows never has a usable `HOME` yet does have `USERPROFILE`.
+  const home = usableSeedHome(inheritedHome)
+  const versionManagerHome = usableSeedHome(accountHome ?? inheritedHome)
   // Why two lists: a seed exists so a GUI-launched Electron can *find* a tool
   // its minimal PATH omits. Putting one ahead of the inherited PATH does more
   // than that — it re-ranks binaries the user already has, and `~/bin` and
@@ -224,11 +251,16 @@ export function patchPackagedProcessPath(): void {
   // database cannot answer at all, it stops a second `homedir()` from throwing on
   // this same synchronous path. `accountHome` rather than `home` because on
   // Windows `HOME` is legitimately unset and `USERPROFILE` carries the directory.
-  prependPaths.push(
-    ...getVersionManagerBinPaths({ homePath: accountHome ?? home }).filter(
-      (path) => !isGenericUserBinDir(path)
+  // Why the guard: with no usable home this call returns entries like `.volta/bin`,
+  // and those are the ones that lead the PATH, so the relative-name exposure above
+  // is worst here rather than in the appended user bins.
+  if (versionManagerHome) {
+    prependPaths.push(
+      ...getVersionManagerBinPaths({ homePath: versionManagerHome }).filter(
+        (path) => !isGenericUserBinDir(path)
+      )
     )
-  )
+  }
 
   const pathKey = process.platform === 'win32' && process.env.Path !== undefined ? 'Path' : 'PATH'
   const currentPath = process.env[pathKey] ?? ''
