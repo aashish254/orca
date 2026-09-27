@@ -60,6 +60,20 @@ describe('patchPackagedProcessPath packaged environment', () => {
   const originalWindowsPath = process.env.Path
   const tempDirs: string[] = []
 
+  // Why read here rather than inside a case: the host platform has to be captured
+  // before any case forces `process.platform`, and this describe body runs at
+  // collection time.
+  // Why the assertion needs it at all: `node:path`'s `join` is bound to the host at
+  // import, and the seed builds its `~`-derived entries with it, so forcing a
+  // platform changes the entries' separator not at all. On a Windows host a
+  // forced-linux launch yields `\home\…\.volta\bin`, which POSIX reads as relative —
+  // so a POSIX-only `isAbsolute` would fail for the runner's OS rather than for the
+  // seed. The defect under test is a segment a spawn resolves against its own cwd,
+  // which is the host's question: `win32.isAbsolute` refuses the bare `.volta/bin`
+  // just as `posix.isAbsolute` does.
+  const hostPlatform = process.platform
+  const isAbsolutePathOnHost = hostPlatform === 'win32' ? win32.isAbsolute : posix.isAbsolute
+
   function setPlatform(platform: NodeJS.Platform): void {
     Object.defineProperty(process, 'platform', { configurable: true, value: platform })
   }
@@ -419,7 +433,7 @@ describe('patchPackagedProcessPath packaged environment', () => {
       // vacuously, and an empty seed would be its own regression.
       expect(segments.length).toBeGreaterThan(0)
       for (const segment of segments) {
-        expect(posix.isAbsolute(segment), segment).toBe(true)
+        expect(isAbsolutePathOnHost(segment), segment).toBe(true)
       }
       // Why still assert the repair landed: the fix is to drop the `~`-derived
       // entries, not to stop seeding the system block that makes a packaged `gh`
