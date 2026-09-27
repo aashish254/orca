@@ -2,7 +2,7 @@ import { app } from 'electron'
 import { quitProcess } from './process-quit-request'
 import { mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, posix, resolve, win32 } from 'node:path'
 import { getVersionManagerBinPaths } from '../codex-cli/command'
 import { isWindowsFnmDefaultAliasDir } from '../../shared/fnm-default-alias-dirs'
 import { getMainE2EConfig } from '../e2e-config'
@@ -130,6 +130,12 @@ function resolveAccountHome(): string | undefined {
   }
 }
 
+/** A relative `join(home, …)` seed entry resolves against each spawn's cwd, so a worktree planting `.local/bin/gh` gets executed (CWE-426). Host-specific isAbsolute: win32 reads `C:\Users\…` as relative under posix. */
+function usableSeedHome(candidate: string): string {
+  const isAbsolutePath = process.platform === 'win32' ? win32.isAbsolute : posix.isAbsolute
+  return isAbsolutePath(candidate) ? candidate : ''
+}
+
 export function patchPackagedProcessPath(): void {
   if (!app.isPackaged) {
     return
@@ -141,7 +147,10 @@ export function patchPackagedProcessPath(): void {
     process.env.HOME = accountHome
   }
 
-  const home = process.env.HOME ?? ''
+  const inheritedHome = process.env.HOME ?? ''
+  const home = usableSeedHome(inheritedHome)
+  // Windows has USERPROFILE but no usable HOME, so the version-manager home falls back to the account directory.
+  const versionManagerHome = usableSeedHome(accountHome ?? inheritedHome)
   // #18234: append generic user bins; prepending ~/.local/bin made a gh/mise wrapper recursively shadow system gh. Shell hydration owns user ordering.
   const isGenericUserBinDir = (path: string): boolean =>
     process.platform !== 'win32' &&
@@ -178,11 +187,15 @@ export function patchPackagedProcessPath(): void {
   }
 
   // env-node shebangs require runtime shims; exclude generic user bins so arbitrary wrappers cannot shadow system tools.
-  for (const path of getVersionManagerBinPaths({ homePath: accountHome ?? home })) {
-    if (isWindowsFnmDefaultAliasDir(path)) {
-      appendPaths.push(path)
-    } else if (!isGenericUserBinDir(path)) {
-      prependPaths.push(path)
+  // Why the guard: with no usable home this call returns `.volta/bin`-style relative entries, and these lead PATH, so the exposure is worst here.
+  // Why the explicit homePath: keeps this list and the `~` seed on one answer, and skips the unguarded homedir() call inside.
+  if (versionManagerHome) {
+    for (const path of getVersionManagerBinPaths({ homePath: versionManagerHome })) {
+      if (isWindowsFnmDefaultAliasDir(path)) {
+        appendPaths.push(path)
+      } else if (!isGenericUserBinDir(path)) {
+        prependPaths.push(path)
+      }
     }
   }
 

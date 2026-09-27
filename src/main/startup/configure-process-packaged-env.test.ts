@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process'
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import type * as nodeOs from 'node:os'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, posix, win32 } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 // Why a separate file rather than more cases in configure-process.test.ts: that
@@ -365,6 +365,70 @@ describe('patchPackagedProcessPath packaged environment', () => {
     expect((process.env.PATH ?? '').split(':')).toContain('/usr/bin')
   })
 
+  // Why this is a security assertion rather than a tidiness one: POSIX resolves a
+  // relative PATH entry against the cwd of *each* spawn, so the bare names an
+  // unresolvable home makes this seed produce — `.volta/bin`, `.asdf/shims`,
+  // `.local/bin` — let a command run inside an untrusted worktree execute a binary
+  // the repository planted under one of those names (CWE-426, raised on this seed by
+  // pullfrog and CodeRabbit). The exposure came in with the account lookup becoming
+  // total: the same host shape used to throw before it could write a PATH.
+  // Why three unresolved shapes rather than one: `throw` and `empty` both end at
+  // `accountHome ?? home === ''`, which is what made this seed emit `.volta/bin` and
+  // its neighbours; a *relative* `HOME` — what a unit file or a `.desktop` exec can
+  // hand a process — reaches the same expression by another route and lands in the
+  // appended user bins instead of the prepended shims, so only a case of its own
+  // keeps the guard honest about both lists.
+  it.each([
+    ['a lookup that throws', 'throw'],
+    ['a lookup that answers an empty string', 'empty'],
+    ['a HOME that is not absolute', 'relative']
+  ] as const)(
+    'seeds no PATH entry that a spawn could resolve against its own working directory, on %s',
+    async (_label, mode) => {
+      const { app } = await import('electron')
+      const { patchPackagedProcessPath } = await import('./configure-process')
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+      if (mode === 'throw') {
+        homedirMock.mockImplementation(() => {
+          throw Object.assign(new Error('uv_os_homedir returned ENOENT'), {
+            code: 'ERR_SYSTEM_ERROR'
+          })
+        })
+      } else if (mode === 'empty') {
+        homedirMock.mockReturnValue('')
+      } else {
+        // Why a lookup that answers, for this case only: the version-manager list has
+        // an absolute home to work from here, so a failure can only come from the
+        // user-bin block the relative `HOME` feeds.
+        homedirMock.mockReturnValue('/home/passwd-user')
+      }
+
+      setPlatform('linux')
+      Object.defineProperty(app, 'isPackaged', { configurable: true, value: true })
+      if (mode === 'relative') {
+        process.env.HOME = '.relative-home'
+      } else {
+        delete process.env.HOME
+      }
+      delete process.env.PATH
+
+      patchPackagedProcessPath()
+
+      const segments = (process.env.PATH ?? '').split(':')
+      // Why the non-empty guard first: a loop over an empty list passes
+      // vacuously, and an empty seed would be its own regression.
+      expect(segments.length).toBeGreaterThan(0)
+      for (const segment of segments) {
+        expect(posix.isAbsolute(segment), segment).toBe(true)
+      }
+      // Why still assert the repair landed: the fix is to drop the `~`-derived
+      // entries, not to stop seeding the system block that makes a packaged `gh`
+      // findable (#23214).
+      expect(segments).toContain('/usr/bin')
+      expect(segments).toContain('/bin')
+    }
+  )
+
   it('uses the Windows account directory for the user bins without writing POSIX HOME', async () => {
     const { app } = await import('electron')
     const { patchPackagedProcessPath } = await import('./configure-process')
@@ -389,5 +453,11 @@ describe('patchPackagedProcessPath packaged environment', () => {
     // Why `/usr/bin` is absent: the distro-bin block is POSIX-only, so a Windows
     // launch gains no entry it could not already resolve.
     expect(segments).not.toContain('/usr/bin')
+    // Why the same rule on Windows: `AppData\Roaming\npm` is just as reachable
+    // through a relative PATH entry as `.local/bin` is on POSIX, and the account
+    // directory here is absolute, so nothing should be emitted relative.
+    for (const segment of segments) {
+      expect(win32.isAbsolute(segment), segment).toBe(true)
+    }
   })
 })
