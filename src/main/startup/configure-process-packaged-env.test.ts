@@ -115,6 +115,37 @@ describe('patchPackagedProcessPath packaged environment', () => {
     expect(segments).toContain('/bin')
   })
 
+  // Why this case is the reported symptom itself, rather than a property of the
+  // seed: `isCommandAvailable()` answers through `isCommandOnLocalPath()`, which
+  // walks `process.env.PATH` with `node:fs` and counts only candidates that
+  // resolve to an *absolute* path. With no PATH that walk starts from `['']`, so
+  // `gh` becomes the relative `gh` and is skipped: `installed: false`, which is
+  // exactly what #23214 reports. The same reporter got `gh --version` to exit 0
+  // by hand in that captured environment, and both answers are correct — libuv
+  // falls back to a default search path when PATH is absent and the fs walk does
+  // not. Pinning the pair is the only way to keep the fix aimed at the verdict
+  // the UI shows rather than at the PATH string it is derived from.
+  it("answers the preflight's own spawn-free lookup after a launch with no PATH", async () => {
+    const { app } = await import('electron')
+    const { patchPackagedProcessPath } = await import('./configure-process')
+    const { isCommandOnLocalPath } = await import('../ipc/command-path-resolver')
+
+    setPlatform('linux')
+    Object.defineProperty(app, 'isPackaged', { configurable: true, value: true })
+    process.env.HOME = '/home/tester'
+    delete process.env.PATH
+
+    // Why `sh` and not `gh`: the candidate has to exist at a fixed absolute path
+    // on every host that runs this suite, and `/bin/sh` is the one that does on
+    // both macOS and Linux. The lookup is `node:fs` only, so asserting through it
+    // keeps this inside the no-subprocess rule for the detection path (#9297).
+    await expect(isCommandOnLocalPath('sh')).resolves.toBe(false)
+
+    patchPackagedProcessPath()
+
+    await expect(isCommandOnLocalPath('sh')).resolves.toBe(true)
+  })
+
   // Why separate from the same rule with an inherited PATH: there the system dirs
   // are already in `currentSegments`, so the dedupe keeps them wherever the user
   // put them and the appended block's internal order cannot be observed. With no
