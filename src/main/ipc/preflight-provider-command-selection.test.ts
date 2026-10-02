@@ -89,6 +89,38 @@ describe.skipIf(process.platform === 'win32')(
       }
     )
 
+    it.each(CLIS)(
+      'keeps the proven %s usable while its version selection refreshes',
+      async (cli) => {
+        const shim = await fixtureCli(cli, 'shim', 'echo broken-shim >&2\nexit 126\n')
+        const good = await fixtureCli(cli, 'good')
+        vi.stubEnv('PATH', [path.dirname(shim), path.dirname(good)].join(path.delimiter))
+        await findRunnableLocalCommand(cli)
+
+        const refreshing = findRunnableLocalCommand(cli)
+        await expect(providerCommand(cli)).resolves.toMatchObject({ stdout: 'good-api\n' })
+        await expect(refreshing).resolves.toEqual({ status: 'available', binary: good })
+        expect(await calls(shim)).toEqual(['--version', '--version'])
+      }
+    )
+
+    it('clears the previous selection only after the newest version probe fails', async () => {
+      const shim = await fixtureCli('gh', 'shim', 'exit 126\n')
+      const good = await fixtureCli(
+        'gh',
+        'good',
+        'if [ "$1" = --version ] && [ "$ORCA_22975_VERSION_DISABLED" = 1 ]; then exit 126; fi\necho good-api\n'
+      )
+      vi.stubEnv('PATH', [path.dirname(shim), path.dirname(good)].join(path.delimiter))
+      await findRunnableLocalCommand('gh')
+      vi.stubEnv('ORCA_22975_VERSION_DISABLED', '1')
+
+      const refreshing = findRunnableLocalCommand('gh')
+      await expect(providerCommand('gh')).resolves.toMatchObject({ stdout: 'good-api\n' })
+      await expect(refreshing).resolves.toMatchObject({ status: 'exec_failed' })
+      expect(resolveSelectedLocalCommand('gh')).toBe('gh')
+    })
+
     it.each(CLIS)('also uses the recovered %s from a known install directory', async (cli) => {
       const shim = await fixtureCli(cli, 'shim', 'exit 126\n')
       const good = await fixtureCli(cli, path.join('.nix-profile', 'bin'))
@@ -147,6 +179,7 @@ describe.skipIf(process.platform === 'win32')(
       const custom = await fixtureCli('gh', 'custom')
       vi.stubEnv('PATH', [path.dirname(shim), path.dirname(good)].join(path.delimiter))
       await findRunnableLocalCommand('gh')
+      const refreshing = findRunnableLocalCommand('gh')
 
       await expect(
         providerCommand('gh', { ...process.env, PATH: path.dirname(custom) })
@@ -155,6 +188,7 @@ describe.skipIf(process.platform === 'win32')(
         execFileCaptureToTermination(custom, ['api', 'user'], { encoding: 'utf8', timeout: 1000 })
       ).resolves.toMatchObject({ stdout: 'custom-api\n' })
       await expect(providerCommand('gh')).resolves.toMatchObject({ stdout: 'good-api\n' })
+      await expect(refreshing).resolves.toEqual({ status: 'available', binary: good })
     })
 
     it('bypasses a selection after PATH or relative-PATH cwd changes', async () => {
@@ -162,7 +196,10 @@ describe.skipIf(process.platform === 'win32')(
       const custom = await fixtureCli('gh', 'custom')
       vi.stubEnv('PATH', path.dirname(good))
       await findRunnableLocalCommand('gh')
+      const refreshing = findRunnableLocalCommand('gh')
       vi.stubEnv('PATH', path.dirname(custom))
+      await expect(providerCommand('gh')).resolves.toMatchObject({ stdout: 'custom-api\n' })
+      await refreshing
       await expect(providerCommand('gh')).resolves.toMatchObject({ stdout: 'custom-api\n' })
 
       vi.stubEnv('PATH', path.relative(process.cwd(), path.dirname(good)))
@@ -194,6 +231,7 @@ describe.skipIf(process.platform === 'win32')(
       const newer = beginLocalCommandSelection('gh')
       await newer(second)
       await older(first)
+      await older(null)
 
       expect(resolveSelectedLocalCommand('gh')).toBe(second)
     })

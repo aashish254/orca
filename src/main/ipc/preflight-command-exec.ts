@@ -153,6 +153,12 @@ async function localProbeCandidates(
 /** Try only version probes; authentication must stay on the selected binary. */
 export async function findRunnableLocalCommand(command: string): Promise<LocalCommandProbe> {
   const publishSelection = beginLocalCommandSelection(command)
+  const result = await probeRunnableLocalCommand(command)
+  await publishSelection(result.status === 'available' ? result.binary : null)
+  return result
+}
+
+async function probeRunnableLocalCommand(command: string): Promise<LocalCommandProbe> {
   const env = buildLocalPreflightEnv()
   const explicit = command.includes('/') || (process.platform === 'win32' && command.includes('\\'))
   // An explicit path is the user's selection, even when it cannot run.
@@ -166,7 +172,6 @@ export async function findRunnableLocalCommand(command: string): Promise<LocalCo
     }
     try {
       await execLocalPreflightCommandOrThrow(binary, ['--version'], { env, timeoutMs })
-      await publishSelection(binary)
       return { status: 'available', binary }
     } catch (error) {
       if (probeTimedOut(error)) {

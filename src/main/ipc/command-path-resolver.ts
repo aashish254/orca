@@ -73,23 +73,37 @@ function commandFileStamp(stats: Stats): string {
 }
 
 /** Publish only a successful version probe; a newer probe supersedes an older one. */
-export function beginLocalCommandSelection(command: string): (binary: string) => Promise<void> {
+export function beginLocalCommandSelection(
+  command: string
+): (binary: string | null) => Promise<void> {
   if (command !== 'gh' && command !== 'glab') {
     return async () => {}
   }
-  const selection: LocalCommandSelection = { scope: selectionScope({}) }
+  const scope = selectionScope({})
+  const previous = localCommandSelections.get(command)
+  const selection: LocalCommandSelection = {
+    scope,
+    selected: previous?.scope === scope ? previous.selected : undefined
+  }
   localCommandSelections.set(command, selection)
   return async (binary) => {
-    if (!path.isAbsolute(binary)) {
+    if (localCommandSelections.get(command) !== selection) {
+      return
+    }
+    if (binary === null || !path.isAbsolute(binary)) {
+      delete selection.selected
       return
     }
     try {
       const stats = await stat(binary)
-      if (localCommandSelections.get(command) === selection && stats.isFile()) {
-        selection.selected = { binary, stamp: commandFileStamp(stats) }
+      if (localCommandSelections.get(command) === selection) {
+        selection.selected = stats.isFile() ? { binary, stamp: commandFileStamp(stats) } : undefined
       }
     } catch {
       // A binary removed during the probe must not become the runtime selection.
+      if (localCommandSelections.get(command) === selection) {
+        delete selection.selected
+      }
     }
   }
 }
@@ -111,7 +125,7 @@ export function resolveSelectedLocalCommand(
   } catch {
     // Missing or replaced binaries require a fresh version probe.
   }
-  localCommandSelections.delete(command)
+  delete selection.selected
   return command
 }
 
