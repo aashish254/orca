@@ -4,6 +4,7 @@ import { homedir } from 'node:os'
 import { promisify } from 'node:util'
 import { buildPosixCommandPathLookupScript } from '../../shared/posix-command-path-lookup'
 import { getSystemCliInstallDirectories } from '../../shared/system-cli-install-dirs'
+import { runProcess } from '../../shared/child-process/run-process'
 import { isCommandOnLocalPath, listLocalCommandPaths } from './command-path-resolver'
 import { buildLocalPreflightEnv } from './preflight-local-env'
 import { runPreflightCommandInWsl } from './preflight-wsl-command'
@@ -19,7 +20,11 @@ export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`
 }
 
-async function withPreflightTimeout<T>(command: string, commandPromise: Promise<T>): Promise<T> {
+async function withPreflightTimeout<T>(
+  command: string,
+  commandPromise: Promise<T>,
+  timeoutMs = PREFLIGHT_COMMAND_TIMEOUT_MS
+): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | null = null
   try {
     return await Promise.race([
@@ -30,7 +35,7 @@ async function withPreflightTimeout<T>(command: string, commandPromise: Promise<
             code: 'ETIMEDOUT'
           })
           reject(error)
-        }, PREFLIGHT_COMMAND_TIMEOUT_MS)
+        }, timeoutMs)
         if (typeof timeout.unref === 'function') {
           timeout.unref()
         }
@@ -49,19 +54,36 @@ async function withPreflightTimeout<T>(command: string, commandPromise: Promise<
  *  docs/reference/wsl-probe-failure-semantics.md before doing so. */
 export async function execLocalPreflightCommandOrThrow(
   command: string,
-  args: string[]
+  args: string[],
+  options: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}
 ): Promise<PreflightCommandResult> {
-  const env = buildLocalPreflightEnv()
+  const env = options.env ?? buildLocalPreflightEnv()
+  const timeoutMs = options.timeoutMs ?? PREFLIGHT_COMMAND_TIMEOUT_MS
+  // Node cannot execFile a batch shim; the shared runner handles its argv safely.
+  if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(command)) {
+    const result = await withPreflightTimeout(
+      command,
+      runProcess({ program: command, args, env, timeoutMs }),
+      timeoutMs
+    )
+    if (result.timedOut || result.code !== 0) {
+      throw Object.assign(new Error(`Failed running ${command}`), {
+        ...result,
+        code: result.timedOut ? 'ETIMEDOUT' : result.code
+      })
+    }
+    return { stdout: result.stdout, stderr: result.stderr }
+  }
   const commandPromise = execFileAsync(command, args, {
     encoding: 'utf-8',
-    timeout: PREFLIGHT_COMMAND_TIMEOUT_MS,
+    timeout: timeoutMs,
     // Preflight probes console-subsystem binaries (git, gh, node); without this
     // each one flashes a console and steals foreground on Windows (#10488).
     windowsHide: true,
     ...(env ? { env } : {})
-  }) as Promise<PreflightCommandResult>
+  })
 
-  return withPreflightTimeout(command, commandPromise)
+  return withPreflightTimeout(command, commandPromise, timeoutMs)
 }
 
 // Throws on any failure — a distro that is booting/unreachable throws the
@@ -78,141 +100,97 @@ export async function execCommandInWslOrThrow(
   return withPreflightTimeout('wsl command', commandPromise)
 }
 
-/** How many extra binaries one local CLI probe may spawn after PATH's winner
- *  fails. Each probe can cost the full 5s timeout, so the fallback stays bounded
- *  no matter how many copies of the CLI a PATH holds. */
-const PREFLIGHT_LOCAL_FALLBACK_PROBE_LIMIT = 3
+const PREFLIGHT_LOCAL_PROBE_LIMIT = 4
 
-type LocalProbeAttempt = 'ran' | 'failed' | 'timed-out'
+export type LocalCommandProbe =
+  | { status: 'available'; binary: string }
+  | { status: 'absent' }
+  | { status: 'exec_failed' | 'timeout' | 'limit_reached'; binary: string }
 
-/**
- * Whether `error` is a kill on timeout rather than a completed run.
- *
- * Narrowed with `in` rather than a cast: `execFile` rejects with an `Error`
- * carrying `killed`/`code`, and Node's own typings do not declare them.
- */
 function probeTimedOut(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) {
     return false
   }
-  if ('killed' in error && error.killed === true) {
-    return true
-  }
-  return 'code' in error && error.code === 'ETIMEDOUT'
+  return (
+    ('killed' in error && error.killed === true) || ('code' in error && error.code === 'ETIMEDOUT')
+  )
 }
 
-/** Runs one probe without letting a failure become an answer. */
-async function attemptLocalProbe(command: string, args: string[]): Promise<LocalProbeAttempt> {
-  try {
-    await execLocalPreflightCommandOrThrow(command, args)
-    return 'ran'
-  } catch (error) {
-    // Why separate: `execFile` reports a completed non-zero exit as a numeric
-    // `code`, and a kill on timeout as `killed` with a null `code`. A timed-out
-    // probe says nothing about the copies behind it, and paying 5s per copy on a
-    // loaded machine would make the Integrations pane slower than the bug.
-    return probeTimedOut(error) ? 'timed-out' : 'failed'
-  }
-}
-
-/**
- * Every location worth spawning for `command`: PATH's own matches in PATH order
- * (relative entries absolutized so the scan can report them), then the system
- * CLI install directories Orca already seeds.
- *
- * Why win32 gets none: `execFile` refuses a `.cmd`/`.bat` spawn without a shell
- * (EINVAL), and Windows PATH hits for these CLIs are routinely npm shims, so an
- * absolute-path fallback would replace "not installed" with a probe error.
- * `getSystemCliInstallDirectories` is POSIX-only for the same kind of reason.
- */
-async function localProbeCandidates(command: string): Promise<string[]> {
-  if (process.platform === 'win32') {
-    return []
-  }
-  const installDirPaths = await listLocalCommandPaths(command, {
-    env: {
-      PATH: getSystemCliInstallDirectories(process.platform, homedir()).join(path.delimiter)
-    }
-  })
-  return [
-    ...new Set([
-      ...(await listLocalCommandPaths(command, { env: { PATH: absolutePathValue() } })),
-      ...installDirPaths
-    ])
-  ]
-}
-
-/**
- * PATH with every relative entry resolved against the directory `execFile`
- * would resolve it against.
- *
- * Why: the fs scan counts only absolute resolutions, so a PATH entry spelled
- * relative to cwd is invisible to it and the copy behind it never enters the
- * probe. Absolutizing the entry leaves that contract (and every other user of
- * the scan) alone while putting the hidden copy back in PATH order — which is
- * what makes it a candidate rather than a last resort: PATH order is also the
- * order in which a doomed shim ahead of it wins every resolution (#22975).
- */
-function absolutePathValue(): string {
-  const pathValue = process.env.PATH ?? process.env.Path ?? ''
-  return pathValue
-    .split(path.delimiter)
-    .map((entry) => (path.isAbsolute(entry) ? entry : path.resolve(entry)))
-    .join(path.delimiter)
-}
-
-/**
- * The `command` this host can actually run, or null when nothing can.
- *
- * Why this exists (#22975): a version-manager shim (`~/.asdf/shims/gh`) is a
- * real, executable script, so every fs lookup — this file's
- * `isCommandOnPath`, `resolveCliCommand`'s install-dir scan — selects it over
- * the working binary behind it and then reports the shim's failure to execute
- * as "not installed". Only spawning distinguishes the two, and only trying the
- * copies behind it recovers the answer.
- *
- * Candidates are probed by absolute path, in PATH order and then install-dir
- * order, and the first one that runs is returned — so the caller probes the
- * *same* binary for `--version` and for whatever it checks next. A healthy host
- * pays one fs scan and the one spawn it already paid.
- */
-export async function findRunnableLocalCommand(
+async function localProbeCandidates(
   command: string,
-  args: string[] = ['--version']
-): Promise<string | null> {
-  const candidates = await localProbeCandidates(command)
-  for (const candidate of candidates.slice(0, 1 + PREFLIGHT_LOCAL_FALLBACK_PROBE_LIMIT)) {
-    const attempt = await attemptLocalProbe(candidate, args)
-    if (attempt === 'ran') {
-      return candidate
-    }
-    if (attempt === 'timed-out') {
-      return null
-    }
-  }
-  // The bare name is the historical probe, and it is still the only route for a
-  // host the scan above cannot answer: win32, which produces no candidates at all,
-  // and a command spelled with a separator (`./bin/gh`), which short-circuits the
-  // PATH walk to a relative resolution the absolute-only scan drops. Where the
-  // scan did report copies, every one of them has been spawned by now, so a host
-  // with an all-absolute PATH does not pay this spawn a second time.
-  if (candidates.length === 0) {
-    return (await attemptLocalProbe(command, args)) === 'ran' ? command : null
-  }
-  return null
+  env: NodeJS.ProcessEnv | undefined
+): Promise<string[]> {
+  const isWin = process.platform === 'win32'
+  const probeEnv = env ?? process.env
+  // Keep relative PATH entries in their original position, as execFile does.
+  const absoluteEnv = isWin
+    ? probeEnv
+    : {
+        ...probeEnv,
+        PATH: (probeEnv.PATH ?? '')
+          .split(path.delimiter)
+          .map((dir) => path.resolve(dir))
+          .join(path.delimiter)
+      }
+  const maxResults = PREFLIGHT_LOCAL_PROBE_LIMIT + 1
+  const paths = await listLocalCommandPaths(command, { env: absoluteEnv, maxResults })
+  const installPaths =
+    isWin || paths.length >= maxResults
+      ? []
+      : await listLocalCommandPaths(command, {
+          env: {
+            PATH: getSystemCliInstallDirectories(process.platform, homedir()).join(path.delimiter)
+          },
+          maxResults
+        })
+  return [...new Set([...paths, ...installPaths])]
 }
 
-/**
- * Whether a WSL distro can run `command --version`.
- *
- * Why no local branch: a boolean is exactly the shape that turned a dead shim
- * into "Not installed" (#22975). Local callers take
- * {@link findRunnableLocalCommand}, which answers with the binary it proved.
- */
+/** Try only version probes; authentication must stay on the selected binary. */
+export async function findRunnableLocalCommand(command: string): Promise<LocalCommandProbe> {
+  const env = buildLocalPreflightEnv()
+  const explicit = command.includes('/') || (process.platform === 'win32' && command.includes('\\'))
+  // An explicit path is the user's selection, even when it cannot run.
+  const candidates = explicit ? [] : await localProbeCandidates(command, env)
+  const probes = candidates.length ? candidates.slice(0, PREFLIGHT_LOCAL_PROBE_LIMIT) : [command]
+  const deadline = Date.now() + PREFLIGHT_COMMAND_TIMEOUT_MS
+  for (const binary of probes) {
+    const timeoutMs = deadline - Date.now()
+    if (timeoutMs <= 0) {
+      return { status: 'timeout', binary }
+    }
+    try {
+      await execLocalPreflightCommandOrThrow(binary, ['--version'], { env, timeoutMs })
+      return { status: 'available', binary }
+    } catch (error) {
+      if (probeTimedOut(error)) {
+        return { status: 'timeout', binary }
+      }
+      if (
+        candidates.length === 0 &&
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        error.code === 'ENOENT' &&
+        !(await isCommandOnLocalPath(explicit ? path.resolve(command) : command, { env }))
+      ) {
+        return { status: 'absent' }
+      }
+    }
+  }
+  return {
+    status: candidates.length > PREFLIGHT_LOCAL_PROBE_LIMIT ? 'limit_reached' : 'exec_failed',
+    binary: probes.at(-1) ?? command
+  }
+}
+
 export async function isCommandAvailable(
   command: string,
-  wslTarget: WslPreflightTarget
+  wslTarget?: WslPreflightTarget
 ): Promise<boolean> {
+  if (!wslTarget) {
+    return (await findRunnableLocalCommand(command)).status === 'available'
+  }
   try {
     await execCommandInWslOrThrow(wslTarget, `${shellQuote(command)} --version`)
     return true

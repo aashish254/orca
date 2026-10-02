@@ -8,6 +8,8 @@ export type ResolveCommandOptions = {
   env?: NodeJS.ProcessEnv
   /** CWD used only for the win32 "search current directory first" rule. */
   cwd?: string
+  /** Stop after this many matches; defaults to the complete list. */
+  maxResults?: number
 }
 
 // Why: Windows env keys are case-insensitive (PATH is usually stored as `Path`,
@@ -82,15 +84,7 @@ export async function resolveCommandOnLocalPath(
   return (await findLocalCommandPaths(command, options, true))[0] ?? null
 }
 
-/**
- * Every ABSOLUTE PATH match for `command`, in the order a shell would try them.
- *
- * Why the full list and not just the winner: a version-manager shim
- * (`~/.asdf/shims/gh`) passes the fs executable check below as readily as the
- * real binary it shadows, so a winner-only lookup can only ever report the
- * shim. Callers that need to know whether the winner actually runs have to be
- * handed the candidates behind it (#22975).
- */
+/** Ordered, deduplicated candidates, including executable shims that may fail to run. */
 export async function listLocalCommandPaths(
   command: string,
   options: ResolveCommandOptions = {}
@@ -131,13 +125,14 @@ async function findLocalCommandPaths(
       const candidate = path.posix.join(dir, command) + ext
       // Why: preserve the prior `.some(line => path.isAbsolute(line))` filter
       // over where/which stdout — only absolute resolutions count.
-      if (!isAbsolute(candidate) || seen.has(candidate)) {
+      const candidateKey = isWin ? candidate.toLowerCase() : candidate
+      if (!isAbsolute(candidate) || seen.has(candidateKey)) {
         continue
       }
-      seen.add(candidate)
+      seen.add(candidateKey)
       if (await isExecutableFile(candidate, isWin)) {
         found.push(candidate)
-        if (stopAtFirst) {
+        if (stopAtFirst || found.length >= (options.maxResults ?? Infinity)) {
           return found
         }
       }

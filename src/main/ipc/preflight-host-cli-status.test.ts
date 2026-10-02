@@ -166,17 +166,29 @@ describe('preflight', () => {
     })
   })
 
-  it('treats gh as unauthenticated when gh auth status fails without auth markers', async () => {
-    execFileAsyncMock
-      .mockResolvedValueOnce({ stdout: 'git version 2.0.0\n' })
-      .mockResolvedValueOnce({ stdout: 'gh version 2.0.0\n' })
-      .mockResolvedValueOnce({ stdout: 'glab version 1.92.1\n' })
-      .mockRejectedValueOnce({ stderr: 'You are not logged into any GitHub hosts.\n' })
-      .mockResolvedValueOnce({ stdout: 'Logged in to gitlab.com\n' })
+  it.each(['gh', 'glab'])('does not switch %s copies after authentication fails', async (cli) => {
+    const first = `/test/first/${cli}`
+    const second = `/test/second/${cli}`
+    listLocalCommandPathsMock.mockImplementation(async (command: string) =>
+      command === cli ? [first, second] : []
+    )
+    execFileAsyncMock.mockImplementation(async (command: string, args: string[]) => {
+      if (command === first && args[0] === 'auth') {
+        throw Object.assign(new Error('not authenticated'), { code: 1, stderr: 'not logged in' })
+      }
+      return { stdout: 'fixture success', stderr: '' }
+    })
 
     const status = await runPreflightCheck()
 
-    expect(status.gh).toEqual({ installed: true, authenticated: false })
+    expect(cli === 'gh' ? status.gh : status.glab).toEqual({
+      installed: true,
+      authenticated: false
+    })
+    expect(
+      execFileAsyncMock.mock.calls.filter(([command]) => command === first).map(([, args]) => args)
+    ).toEqual([['--version'], ['auth', 'status']])
+    expect(execFileAsyncMock.mock.calls.some(([command]) => command === second)).toBe(false)
   })
 
   it('keeps older gh stderr success output from showing a false auth warning', async () => {
@@ -210,7 +222,6 @@ describe('preflight', () => {
     })
     execFileAsyncMock.mockImplementation(async (command: string, args: string[]) => {
       if (shims.has(command)) {
-        // The measured asdf failure: exit status 126, not ENOENT.
         throw Object.assign(new Error('spawn failed'), { code: 126 })
       }
       const auth = args[0] === 'auth'
@@ -232,8 +243,6 @@ describe('preflight', () => {
       gh: { installed: true, authenticated: true },
       glab: { installed: true, authenticated: true }
     })
-    // Why the pair: `--version` proving a copy is worthless if `auth status`
-    // then re-resolves the bare name and re-picks the shim (#22975).
     for (const [cli, copy] of [
       ['gh', working],
       ['glab', glabWorking]
@@ -274,8 +283,6 @@ describe('preflight', () => {
     const status = await runPreflightCheck()
 
     expect(status.gh).toEqual({ installed: false, authenticated: false })
-    // Why 5 and not 6: git, the two doomed gh copies, and glab --version all
-    // spawn, so the only way to reach 6 is a gh auth probe.
     expect(execFileAsyncMock).toHaveBeenCalledTimes(5)
   })
 

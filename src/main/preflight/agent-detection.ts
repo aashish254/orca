@@ -140,12 +140,11 @@ async function detectCommandRuntime(
       ? { installed: true, wslTarget }
       : { installed: false }
   }
-  // Why the binary travels with the verdict: the `auth status` probe that follows
-  // has to run the same copy that answered `--version`. Left to resolve the bare
-  // name through PATH again it would re-pick the dead shim, moving the card's lie
-  // from "not installed" to "installed, not authenticated" (#22975).
-  const binary = await findRunnableLocalCommand(command)
-  return binary ? { installed: true, binary } : { installed: false }
+  // Pin auth to the copy that passed --version, so PATH cannot select the dead shim again.
+  const probe = await findRunnableLocalCommand(command)
+  return probe.status === 'available'
+    ? { installed: true, binary: probe.binary }
+    : { installed: false }
 }
 
 export async function detectInstalledAgents(context?: PreflightRuntimeContext): Promise<string[]> {
