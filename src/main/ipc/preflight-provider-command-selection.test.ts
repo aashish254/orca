@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { removeTree } from '../../shared/windows-transient-lock-removal'
 import { ghExecFileAsync } from '../git/command-runner/gh-exec-file'
 import { glabExecFileAsync } from '../git/command-runner/glab-exec-file'
 import { execFileCaptureToTermination } from '../git/command-runner/exec-file-capture'
@@ -63,7 +64,7 @@ describe.skipIf(process.platform === 'win32')(
 
     afterEach(async () => {
       vi.unstubAllEnvs()
-      await rm(root, { recursive: true, force: true })
+      await removeTree(root)
     })
 
     it.each(CLIS)(
@@ -245,7 +246,7 @@ describe.runIf(process.platform === 'win32')('native provider batch selection', 
 
   afterEach(async () => {
     vi.unstubAllEnvs()
-    await rm(root, { recursive: true, force: true })
+    await removeTree(root)
   })
 
   it.each(CLIS)('passes the selected %s.cmd through the native runner', async (cli) => {

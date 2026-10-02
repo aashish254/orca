@@ -1,7 +1,8 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { removeTree } from '../../shared/windows-transient-lock-removal'
 import {
   execLocalPreflightCommandOrThrow,
   findRunnableLocalCommand,
@@ -46,7 +47,7 @@ describe.skipIf(process.platform === 'win32')(
 
     afterEach(async () => {
       vi.unstubAllEnvs()
-      await rm(root, { recursive: true, force: true })
+      await removeTree(root)
     })
 
     it('detects a runnable copy behind an executable shim that exits 126', async () => {
@@ -218,7 +219,7 @@ describe.runIf(process.platform === 'win32')('Windows preflight batch shims', ()
 
   afterEach(async () => {
     vi.unstubAllEnvs()
-    await rm(root, { recursive: true, force: true })
+    await removeTree(root)
   })
 
   it('runs the next cmd shim after an earlier copy exits 126', async () => {
