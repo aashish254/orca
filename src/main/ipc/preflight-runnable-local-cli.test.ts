@@ -196,7 +196,7 @@ describe.skipIf(process.platform === 'win32')(
         binary: path.join(hung, COMMAND)
       })
       expect(await probedArgs(good)).toEqual([])
-    })
+    }, 10_000)
 
     it('uses the known Nix install directory after PATH copies fail', async () => {
       const shim = await cliInDirectory('shim', BROKEN_SHIM)

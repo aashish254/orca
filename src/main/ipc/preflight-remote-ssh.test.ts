@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type * as LocalCommandResolver from './command-path-resolver'
 
 const {
   handleMock,
@@ -60,7 +61,8 @@ vi.mock('../../shared/node-cli-command-resolution', () => ({
 // Why (#9297): local PATH resolution is now fs-based (no where/which spawn).
 // These tests express "which commands are on PATH" via the where/which mock,
 // so route the resolver through that same mock to preserve their intent.
-vi.mock('./command-path-resolver', () => ({
+vi.mock('./command-path-resolver', async (importOriginal) => ({
+  ...(await importOriginal<typeof LocalCommandResolver>()),
   isCommandOnLocalPath: isCommandOnLocalPathMock,
   listLocalCommandPaths: listLocalCommandPathsMock
 }))

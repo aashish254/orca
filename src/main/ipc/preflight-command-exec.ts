@@ -5,7 +5,11 @@ import { promisify } from 'node:util'
 import { buildPosixCommandPathLookupScript } from '../../shared/posix-command-path-lookup'
 import { getSystemCliInstallDirectories } from '../../shared/system-cli-install-dirs'
 import { runProcess } from '../../shared/child-process/run-process'
-import { isCommandOnLocalPath, listLocalCommandPaths } from './command-path-resolver'
+import {
+  beginLocalCommandSelection,
+  isCommandOnLocalPath,
+  listLocalCommandPaths
+} from './command-path-resolver'
 import { buildLocalPreflightEnv } from './preflight-local-env'
 import { runPreflightCommandInWsl } from './preflight-wsl-command'
 import type { WslPreflightTarget } from './preflight-wsl-agent-detection'
@@ -148,6 +152,7 @@ async function localProbeCandidates(
 
 /** Try only version probes; authentication must stay on the selected binary. */
 export async function findRunnableLocalCommand(command: string): Promise<LocalCommandProbe> {
+  const publishSelection = beginLocalCommandSelection(command)
   const env = buildLocalPreflightEnv()
   const explicit = command.includes('/') || (process.platform === 'win32' && command.includes('\\'))
   // An explicit path is the user's selection, even when it cannot run.
@@ -161,6 +166,7 @@ export async function findRunnableLocalCommand(command: string): Promise<LocalCo
     }
     try {
       await execLocalPreflightCommandOrThrow(binary, ['--version'], { env, timeoutMs })
+      await publishSelection(binary)
       return { status: 'available', binary }
     } catch (error) {
       if (probeTimedOut(error)) {

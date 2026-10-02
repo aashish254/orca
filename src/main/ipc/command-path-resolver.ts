@@ -1,4 +1,6 @@
 import { access, constants as fsConstants, stat } from 'node:fs/promises'
+import { statSync, type Stats } from 'node:fs'
+import { homedir } from 'node:os'
 import path from 'node:path'
 
 export type ResolveCommandOptions = {
@@ -38,6 +40,79 @@ function getWindowsExtensions(env: NodeJS.ProcessEnv, command: string): string[]
     extensions.unshift('')
   }
   return extensions
+}
+
+type LocalCommandSelection = {
+  scope: string
+  selected?: { binary: string; stamp: string }
+}
+
+const localCommandSelections = new Map<string, LocalCommandSelection>()
+
+function selectionScope(options: ResolveCommandOptions): string {
+  const platform = options.platform ?? process.platform
+  const env = options.env ?? process.env
+  const isWin = platform === 'win32'
+  const pathValue = readEnvCaseInsensitive(env, 'PATH') ?? ''
+  const pathApi = isWin ? path.win32 : path.posix
+  const needsCwd =
+    isWin || pathValue.split(isWin ? ';' : ':').some((dir) => !pathApi.isAbsolute(dir))
+  return JSON.stringify([
+    platform,
+    pathValue,
+    isWin ? readEnvCaseInsensitive(env, 'PATHEXT') : null,
+    env.HOME,
+    env.USERPROFILE,
+    homedir(),
+    needsCwd ? (options.cwd ?? process.cwd()) : null
+  ])
+}
+
+function commandFileStamp(stats: Stats): string {
+  return [stats.dev, stats.ino, stats.size, stats.mtimeMs, stats.ctimeMs, stats.mode].join(':')
+}
+
+/** Publish only a successful version probe; a newer probe supersedes an older one. */
+export function beginLocalCommandSelection(command: string): (binary: string) => Promise<void> {
+  if (command !== 'gh' && command !== 'glab') {
+    return async () => {}
+  }
+  const selection: LocalCommandSelection = { scope: selectionScope({}) }
+  localCommandSelections.set(command, selection)
+  return async (binary) => {
+    if (!path.isAbsolute(binary)) {
+      return
+    }
+    try {
+      const stats = await stat(binary)
+      if (localCommandSelections.get(command) === selection && stats.isFile()) {
+        selection.selected = { binary, stamp: commandFileStamp(stats) }
+      }
+    } catch {
+      // A binary removed during the probe must not become the runtime selection.
+    }
+  }
+}
+
+/** Native execution reuses preflight's selection without probing or replaying the operation. */
+export function resolveSelectedLocalCommand(
+  command: string,
+  options: ResolveCommandOptions = {}
+): string {
+  const selection = localCommandSelections.get(command)
+  if (!selection?.selected || selection.scope !== selectionScope(options)) {
+    return command
+  }
+  try {
+    const stats = statSync(selection.selected.binary)
+    if (commandFileStamp(stats) === selection.selected.stamp) {
+      return selection.selected.binary
+    }
+  } catch {
+    // Missing or replaced binaries require a fresh version probe.
+  }
+  localCommandSelections.delete(command)
+  return command
 }
 
 async function isExecutableFile(candidate: string, isWin: boolean): Promise<boolean> {
