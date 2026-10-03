@@ -44,7 +44,7 @@ function getWindowsExtensions(env: NodeJS.ProcessEnv, command: string): string[]
 
 type LocalCommandSelection = {
   scope: string
-  selected?: { binary: string; stamp: string }
+  selected?: { binary: string; stamp: string; cwd?: string }
 }
 
 const localCommandSelections = new Map<string, LocalCommandSelection>()
@@ -55,8 +55,7 @@ function selectionScope(options: ResolveCommandOptions): string {
   const isWin = platform === 'win32'
   const pathValue = readEnvCaseInsensitive(env, 'PATH') ?? ''
   const pathApi = isWin ? path.win32 : path.posix
-  const needsCwd =
-    isWin || pathValue.split(isWin ? ';' : ':').some((dir) => !pathApi.isAbsolute(dir))
+  const needsCwd = pathValue.split(isWin ? ';' : ':').some((dir) => !pathApi.isAbsolute(dir))
   return JSON.stringify([
     platform,
     pathValue,
@@ -80,6 +79,7 @@ export function beginLocalCommandSelection(
     return async () => {}
   }
   const scope = selectionScope({})
+  const probeCwd = process.cwd()
   const previous = localCommandSelections.get(command)
   const selection: LocalCommandSelection = {
     scope,
@@ -97,7 +97,16 @@ export function beginLocalCommandSelection(
     try {
       const stats = await stat(binary)
       if (localCommandSelections.get(command) === selection) {
-        selection.selected = stats.isFile() ? { binary, stamp: commandFileStamp(stats) } : undefined
+        const cwd =
+          process.platform === 'win32' &&
+          path.win32.resolve(path.win32.dirname(binary)).toLowerCase() ===
+            path.win32.resolve(probeCwd).toLowerCase()
+            ? probeCwd
+            : undefined
+        // Only a current-directory CLI needs to stay tied to the probe's folder.
+        selection.selected = stats.isFile()
+          ? { binary, stamp: commandFileStamp(stats), cwd }
+          : undefined
       }
     } catch {
       // A binary removed during the probe must not become the runtime selection.
@@ -115,6 +124,13 @@ export function resolveSelectedLocalCommand(
 ): string {
   const selection = localCommandSelections.get(command)
   if (!selection?.selected || selection.scope !== selectionScope(options)) {
+    return command
+  }
+  if (
+    selection.selected.cwd &&
+    path.win32.resolve(options.cwd ?? process.cwd()).toLowerCase() !==
+      path.win32.resolve(selection.selected.cwd).toLowerCase()
+  ) {
     return command
   }
   try {

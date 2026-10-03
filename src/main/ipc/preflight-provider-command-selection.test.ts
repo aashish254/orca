@@ -239,6 +239,53 @@ describe.skipIf(process.platform === 'win32')(
   }
 )
 
+describe('Windows selection across working folders', () => {
+  it('keeps an absolute PATH selection in a different provider cwd', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'orca-22975-cwd-'))
+    const binary = path.join(directory, 'gh.CMD')
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+    await writeFile(binary, '@echo off\r\nexit /b 0\r\n')
+    try {
+      Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' })
+      vi.stubEnv('PATH', directory)
+      const publish = beginLocalCommandSelection('gh')
+      await publish(binary)
+      expect(resolveSelectedLocalCommand('gh', { cwd: path.join(directory, 'project') })).toBe(
+        binary
+      )
+    } finally {
+      vi.unstubAllEnvs()
+      if (descriptor) {
+        Object.defineProperty(process, 'platform', descriptor)
+      }
+      await removeTree(directory)
+    }
+  })
+
+  it('does not carry a current-directory CLI into another folder', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'orca-22975-local-cwd-'))
+    const binary = path.join(directory, 'gh.CMD')
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+    await writeFile(binary, '@echo off\r\nexit /b 0\r\n')
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(directory)
+    try {
+      Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' })
+      vi.stubEnv('PATH', path.join(directory, 'other'))
+      const publish = beginLocalCommandSelection('gh')
+      await publish(binary)
+      expect(resolveSelectedLocalCommand('gh')).toBe(binary)
+      expect(resolveSelectedLocalCommand('gh', { cwd: path.join(directory, 'project') })).toBe('gh')
+    } finally {
+      cwd.mockRestore()
+      vi.unstubAllEnvs()
+      if (descriptor) {
+        Object.defineProperty(process, 'platform', descriptor)
+      }
+      await removeTree(directory)
+    }
+  })
+})
+
 describe.runIf(process.platform === 'win32')('native provider batch selection', () => {
   beforeEach(async () => {
     root = await mkdtemp(path.join(tmpdir(), 'orca-22975-provider-cmd-'))
@@ -267,7 +314,7 @@ describe.runIf(process.platform === 'win32')('native provider batch selection', 
       status: 'available',
       binary: path.posix.join(good, `${cli}.CMD`)
     })
-    await expect(providerCommand(cli)).resolves.toMatchObject({
+    await expect(providerCommand(cli, undefined, root)).resolves.toMatchObject({
       stdout: expect.stringContaining('good-api')
     })
   })
