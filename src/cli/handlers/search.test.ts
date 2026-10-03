@@ -4,6 +4,7 @@ import { AiVaultSearchResponseSchema } from '../../shared/ai-vault-search-contra
 import type { AiVaultSearchResponse, AiVaultSearchStatus } from '../../shared/ai-vault-search-types'
 import { REPEATED_FLAG_SEPARATOR } from '../args'
 import { RuntimeClientError } from '../runtime/types'
+import { AI_VAULT_AGENTS } from '../../shared/ai-vault-types'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -102,7 +103,13 @@ describe('orca search over the runtime RPC', () => {
     const { call } = await runSearch([['query', 'resize race']])
 
     expect(call).toHaveBeenCalledTimes(1)
-    expect(call).toHaveBeenCalledWith('aiVault.searchSessions', { query: 'resize race', limit: 20 })
+    expect(call).toHaveBeenCalledWith('aiVault.searchSessions', {
+      query: 'resize race',
+      limit: 20,
+      supportedAgents: [...AI_VAULT_AGENTS],
+      supportsQoderHistory: true,
+      supportsJcodeHistory: true
+    })
   })
 
   const flagCases: [string, CliFlags, Record<string, unknown>][] = [
@@ -157,7 +164,12 @@ describe('orca search over the runtime RPC', () => {
   it.each(flagCases)('sends %s', async (_name, flags, params) => {
     const { call } = await runSearch(flags)
 
-    expect(call).toHaveBeenCalledWith('aiVault.searchSessions', params)
+    expect(call).toHaveBeenCalledWith('aiVault.searchSessions', {
+      ...params,
+      supportedAgents: [...AI_VAULT_AGENTS],
+      supportsQoderHistory: true,
+      supportsJcodeHistory: true
+    })
   })
 
   it('calls the status RPC for --index-status', async () => {

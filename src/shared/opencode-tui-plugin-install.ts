@@ -1,11 +1,18 @@
-import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { isInstalledOpenCodePluginCurrent } from './opencode-installed-plugin'
+import { mkdirSync } from 'node:fs'
+import {
+  writeCanonicalOpenCodePluginAtomically,
+  writeOverlayOpenCodePluginAtomically
+} from './opencode-plugin-atomic-write'
+import { dirname, join } from 'node:path'
+import { registerOpenCodeTuiPlugin } from './opencode-tui-config-registration'
+import {
+  isInstalledOpenCodePluginCurrent,
+  isOverlayOpenCodePluginCurrent
+} from './opencode-installed-plugin'
 
 /**
  * Directory holding the TUI copy of a status plugin file. OpenCode 2 loads a
- * `tui` entrypoint only from a plugins/ subdirectory, and OpenCode 1 loads only
- * plugins/*.js files, so this entry is invisible to 1.x.
+ * `tui` entrypoint from a plugins/ subdirectory; 1.x needs explicit config registration.
  */
 export function openCodeTuiPluginDirName(pluginFileName: string): string {
   return `${pluginFileName.replace(/\.js$/, '')}-tui`
@@ -19,18 +26,32 @@ export function openCodeTuiPluginDirName(pluginFileName: string): string {
 export function writeOpenCodeTuiPlugin(
   pluginsDir: string,
   pluginFileName: string,
-  source: string
+  source: string,
+  ownership: 'canonical' | 'overlay' = 'canonical'
 ): void {
   const dir = join(pluginsDir, openCodeTuiPluginDirName(pluginFileName))
   const entry = join(dir, 'tui.js')
-  if (isInstalledOpenCodePluginCurrent(entry, source)) {
+  // The 1.x TUI loader rejects a default object that also exposes server().
+  const tuiSource =
+    source.includes('const ORCA_STATUS_AGENT = "opencode";') &&
+    source.includes('async function setupLegacyOpenCodeTui(')
+      ? `${source.replace(/^export default /m, 'const orcaServerPlugin = ')}\nconst { server: _orcaServerOnly, ...orcaTuiPlugin } = orcaServerPlugin;\nexport default { id: ${JSON.stringify(pluginFileName.replace(/\.js$/, ''))}, setup: setupOpenCode2Status, ...orcaTuiPlugin, tui: setupLegacyOpenCodeTui };\n`
+      : source
+  const isCurrent =
+    ownership === 'canonical' ? isInstalledOpenCodePluginCurrent : isOverlayOpenCodePluginCurrent
+  if (isCurrent(entry, tuiSource)) {
+    if (tuiSource !== source) {
+      registerOpenCodeTuiPlugin(dirname(pluginsDir), entry, ownership)
+    }
     return
   }
   mkdirSync(dir, { recursive: true })
-  try {
-    unlinkSync(entry)
-  } catch {
-    // First install, or nothing to replace.
+  const write =
+    ownership === 'canonical'
+      ? writeCanonicalOpenCodePluginAtomically
+      : writeOverlayOpenCodePluginAtomically
+  write(entry, tuiSource)
+  if (tuiSource !== source) {
+    registerOpenCodeTuiPlugin(dirname(pluginsDir), entry, ownership)
   }
-  writeFileSync(entry, source)
 }

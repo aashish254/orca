@@ -35,6 +35,11 @@ const KNOWN_PREEXISTING_I2_FAILURES: Record<string, number> = {
   less: 6,
   nano: 2,
   opencode: 5,
+  // Captured boots expose the existing background/cursor restore loss; serializer code is unchanged.
+  'opencode-1-18-32-timed-boot-hidden-pane': 16,
+  'opencode-1-18-32-timed-boot-slow': 16,
+  'opencode-1-18-32-timed-first-launch': 16,
+  'opencode-2-0-18-timed-boot-hidden-pane': 14,
   // Shrink leaves the cursor one column short; also present in the pre-Qoder serializer.
   'qoder-no-account': 2,
   'qoder-ready': 2,
@@ -99,7 +104,12 @@ const KNOWN_PREEXISTING_I2_FAILURES: Record<string, number> = {
   'prime-agent-0-9-8-slash-menu': 34,
   'prime-agent-0-9-8-tool-turn': 40,
   'prime-agent-0-9-8-trace-question': 4,
-  'prime-agent-0-9-8-turn-ended': 24
+  'prime-agent-0-9-8-turn-ended': 24,
+  // OMP 18.4.5 captures, serializer untouched: after a shrink the restored cursor sits one column
+  // short, as for Qoder. The unscrubbed captures diverge identically, so the scrub is not the cause.
+  'omp-18-composer': 2,
+  'omp-18-composer-narrow': 7,
+  'omp-18-setup': 6
 }
 
 // Exact resize checkpoints and full GridDiff hashes from base 6835b9b4e3ea, not this branch.

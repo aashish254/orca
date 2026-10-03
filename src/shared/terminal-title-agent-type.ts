@@ -175,7 +175,7 @@ function computeAgentLabel(title: string): string | null {
     return 'DeepSeek Harness'
   }
   if (isQoderTerminalTitle(title)) {
-    return 'Qoder CLI'
+    return title.includes('Qoder CLI CN') ? 'Qoder CLI CN' : 'Qoder CLI'
   }
   if (isGeminiTerminalTitle(title)) {
     return 'Gemini CLI'
@@ -210,6 +210,9 @@ function computeAgentLabel(title: string): string | null {
   }
   if (titleHasAgentName(title, 'devin')) {
     return 'Devin'
+  }
+  if (titleHasAgentName(title, 'jcode')) {
+    return 'Jcode'
   }
   if (titleHasAgentName(title, 'antigravity') || AGY_AGENT_NAME_RE.test(title)) {
     return 'Antigravity'
@@ -258,10 +261,13 @@ const TITLE_LABEL_TO_AGENT: Partial<Record<string, TuiAgent>> = {
   OpenClaude: 'openclaude',
   Codex: 'codex',
   'Qoder CLI': 'qoder',
+  'Qoder CLI CN': 'qoder-cn',
+  'Qoder CLI China': 'qoder-cn',
   'Gemini CLI': 'gemini',
   'GitHub Copilot': 'copilot',
   Grok: 'grok',
   Devin: 'devin',
+  Jcode: 'jcode',
   Antigravity: 'antigravity',
   OpenCode: 'opencode',
   'OpenCode 2': 'opencode2',

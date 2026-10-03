@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { AI_VAULT_AGENTS } from '../../../../shared/ai-vault-types'
 import { RpcDispatcher } from '../dispatcher'
 import { OrcaRuntimeService } from '../../orca-runtime'
 import { AI_VAULT_METHODS } from './ai-vault'
@@ -52,7 +53,15 @@ describe('session search runtime RPC', () => {
       expect(text.includes('/host/transcript.jsonl')).toBe(clientKind === undefined)
       expect(text.includes('resumeCommand')).toBe(clientKind === undefined)
       expect(service.search).toHaveBeenCalledExactlyOnceWith(
-        { query: 'needle', limit: 20 },
+        {
+          query: 'needle',
+          limit: 20,
+          filters: {
+            agents: AI_VAULT_AGENTS.filter(
+              (agent) => !['codebuddy', 'zcode', 'qoder', 'jcode'].includes(agent)
+            )
+          }
+        },
         undefined
       )
       const status = await rpc.dispatch(
@@ -62,6 +71,51 @@ describe('session search runtime RPC', () => {
       expect(status).toMatchObject({ ok: true, result: { enabled: true, generation: 7 } })
     }
   )
+  it.each([undefined, 'runtime', 'mobile'] as const)(
+    'retains the current catalog for an attested client kind %s',
+    async (clientKind) => {
+      const service = fakeSearchService()
+      setSessionSearchService(service)
+      expect(
+        await dispatcher().dispatch(
+          request({
+            query: 'needle',
+            supportedAgents: [...AI_VAULT_AGENTS],
+            filters: { agents: ['jcode'] }
+          }),
+          { clientKind }
+        )
+      ).toMatchObject({ ok: true })
+      expect(service.search).toHaveBeenCalledExactlyOnceWith(
+        { query: 'needle', limit: 20, filters: { agents: ['jcode'] } },
+        undefined
+      )
+    }
+  )
+  describe.each(['qoder', 'jcode'] as const)('%s history capability', (agent) => {
+    const supportField = agent === 'qoder' ? 'supportsQoderHistory' : 'supportsJcodeHistory'
+    it.each([undefined, 'runtime', 'mobile'] as const)(
+      'preserves explicitly supported filters for client kind %s',
+      async (clientKind) => {
+        const service = fakeSearchService()
+        setSessionSearchService(service)
+        expect(
+          await dispatcher().dispatch(
+            request({
+              query: 'needle',
+              [supportField]: true,
+              filters: { agents: [agent, 'codex'] }
+            }),
+            { clientKind }
+          )
+        ).toMatchObject({ ok: true })
+        expect(service.search).toHaveBeenCalledExactlyOnceWith(
+          { query: 'needle', limit: 20, filters: { agents: [agent, 'codex'] } },
+          undefined
+        )
+      }
+    )
+  })
   it('maps the old runtime dispatcher refusal and rejects malformed responses', async () => {
     const legacy = dispatcher(true)
     const client = createSessionSearchClient(async (method, params) => {
