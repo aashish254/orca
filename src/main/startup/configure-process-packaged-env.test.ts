@@ -45,6 +45,7 @@ describe('patchPackagedProcessPath packaged environment', () => {
   const originalHome = process.env.HOME
   const originalPath = process.env.PATH
   const originalWindowsPath = process.env.Path
+  const originalFnmDir = process.env.FNM_DIR
   const tempDirs: string[] = []
 
   // The seed builds `~` entries with host-bound `path.join`, so absoluteness is the host's question even for a forced platform.
@@ -65,8 +66,13 @@ describe('patchPackagedProcessPath packaged environment', () => {
     if (originalPlatform) {
       Object.defineProperty(process, 'platform', originalPlatform)
     }
-    for (const key of ['HOME', 'PATH', 'Path'] as const) {
-      const original = { HOME: originalHome, PATH: originalPath, Path: originalWindowsPath }[key]
+    for (const key of ['HOME', 'PATH', 'Path', 'FNM_DIR'] as const) {
+      const original = {
+        HOME: originalHome,
+        PATH: originalPath,
+        Path: originalWindowsPath,
+        FNM_DIR: originalFnmDir
+      }[key]
       if (original === undefined) {
         delete process.env[key]
       } else {
@@ -97,23 +103,26 @@ describe('patchPackagedProcessPath packaged environment', () => {
     expect(segments).toContain('/bin')
   })
 
-  it("answers the preflight's own spawn-free lookup after a launch with no PATH", async () => {
-    const { app } = await import('electron')
-    const { patchPackagedProcessPath } = await import('./configure-process')
-    const { isCommandOnLocalPath } = await import('../ipc/command-path-resolver')
+  it.skipIf(hostPlatform === 'win32')(
+    "answers the preflight's own spawn-free lookup after a launch with no PATH",
+    async () => {
+      const { app } = await import('electron')
+      const { patchPackagedProcessPath } = await import('./configure-process')
+      const { isCommandOnLocalPath } = await import('../ipc/command-path-resolver')
 
-    setPlatform('linux')
-    Object.defineProperty(app, 'isPackaged', { configurable: true, value: true })
-    process.env.HOME = '/home/tester'
-    delete process.env.PATH
+      setPlatform('linux')
+      Object.defineProperty(app, 'isPackaged', { configurable: true, value: true })
+      process.env.HOME = '/home/tester'
+      delete process.env.PATH
 
-    // `/bin/sh` exists at a fixed absolute path on every runner, and this stays inside the no-subprocess rule (#9297).
-    await expect(isCommandOnLocalPath('sh')).resolves.toBe(false)
+      // `/bin/sh` exists at a fixed absolute path on every POSIX runner, and this stays inside the no-subprocess rule (#9297).
+      await expect(isCommandOnLocalPath('sh')).resolves.toBe(false)
 
-    patchPackagedProcessPath()
+      patchPackagedProcessPath()
 
-    await expect(isCommandOnLocalPath('sh')).resolves.toBe(true)
-  })
+      await expect(isCommandOnLocalPath('sh')).resolves.toBe(true)
+    }
+  )
 
   it('keeps a seeded user bin dir behind a seeded system bin when the launch had no PATH', async () => {
     const { app } = await import('electron')
@@ -205,42 +214,45 @@ describe('patchPackagedProcessPath packaged environment', () => {
     }
   })
 
-  it('gives a spawned child the repaired HOME and a PATH that resolves a CLI', async () => {
-    const { app } = await import('electron')
-    const { patchPackagedProcessPath } = await import('./configure-process')
+  it.skipIf(hostPlatform === 'win32')(
+    'gives a spawned child the repaired HOME and a PATH that resolves a CLI',
+    async () => {
+      const { app } = await import('electron')
+      const { patchPackagedProcessPath } = await import('./configure-process')
 
-    // Both symptoms are about what a child inherits; `<home>/bin` is seed-appended, so a hit can only come from the seed.
-    const home = makeTempHome()
-    const marker = 'orca-23214-probe-cli'
-    mkdirSync(join(home, 'bin'), { recursive: true })
-    const cliPath = join(home, 'bin', marker)
-    writeFileSync(cliPath, '#!/bin/sh\necho ran\n')
-    chmodSync(cliPath, 0o755)
+      // Both symptoms are about what a child inherits; `<home>/bin` is seed-appended, so a hit can only come from the seed.
+      const home = makeTempHome()
+      const marker = 'orca-23214-probe-cli'
+      mkdirSync(join(home, 'bin'), { recursive: true })
+      const cliPath = join(home, 'bin', marker)
+      writeFileSync(cliPath, '#!/bin/sh\necho ran\n')
+      chmodSync(cliPath, 0o755)
 
-    setPlatform('linux')
-    Object.defineProperty(app, 'isPackaged', { configurable: true, value: true })
-    homedirMock.mockReturnValue(home)
-    process.env.HOME = home
-    delete process.env.PATH
-    delete process.env.Path
+      setPlatform('linux')
+      Object.defineProperty(app, 'isPackaged', { configurable: true, value: true })
+      homedirMock.mockReturnValue(home)
+      process.env.HOME = home
+      delete process.env.PATH
+      delete process.env.Path
 
-    patchPackagedProcessPath()
+      patchPackagedProcessPath()
 
-    const parentPath = process.env.PATH ?? ''
-    // An absolute interpreter, so a missing PATH doesn't make the harness rather than the seed the failure.
-    const child = spawnSync(
-      '/bin/sh',
-      ['-c', `printf '%s\\0%s\\0%s' "$HOME" "$PATH" "$(command -v ${marker})"`],
-      { encoding: 'utf8' }
-    )
+      const parentPath = process.env.PATH ?? ''
+      // An absolute interpreter, so a missing PATH doesn't make the harness rather than the seed the failure.
+      const child = spawnSync(
+        '/bin/sh',
+        ['-c', `printf '%s\\0%s\\0%s' "$HOME" "$PATH" "$(command -v ${marker})"`],
+        { encoding: 'utf8' }
+      )
 
-    expect(child.status).toBe(0)
-    const [childHome, childPath, childCli] = (child.stdout ?? '').split('\0')
-    expect(childHome).toBe(home)
-    expect(childPath).toBe(parentPath)
-    expect(childPath.split(':')).toContain('/usr/bin')
-    expect(childCli, 'CLI reachable only through the seeded PATH').toBe(cliPath)
-  })
+      expect(child.status).toBe(0)
+      const [childHome, childPath, childCli] = (child.stdout ?? '').split('\0')
+      expect(childHome).toBe(home)
+      expect(childPath).toBe(parentPath)
+      expect(childPath.split(':')).toContain('/usr/bin')
+      expect(childCli, 'CLI reachable only through the seeded PATH').toBe(cliPath)
+    }
+  )
 
   it('keeps starting, and still seeds the system bins, when the account database cannot answer HOME', async () => {
     const { app } = await import('electron')
@@ -380,5 +392,37 @@ describe('patchPackagedProcessPath packaged environment', () => {
     for (const segment of segments) {
       expect(win32.isAbsolute(segment), segment).toBe(true)
     }
+  })
+
+  it('classifies the fnm default alias without a second home lookup when the Windows account lookup throws', async () => {
+    const { app } = await import('electron')
+    const { patchPackagedProcessPath } = await import('./configure-process')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    // Before the fix this is the second call, and the packaged launch aborted with PATH unpatched.
+    homedirMock.mockImplementation(() => {
+      throw Object.assign(new Error('uv_os_homedir returned ENOENT'), { code: 'ERR_SYSTEM_ERROR' })
+    })
+
+    setPlatform('win32')
+    Object.defineProperty(app, 'isPackaged', { configurable: true, value: true })
+    // An absolute value under win32 syntax, which is the syntax the forced platform checks.
+    process.env.HOME = 'C:\\Users\\tester'
+    // Pinned so the alias dir is one entry and host APPDATA cannot vary the expected seed.
+    process.env.FNM_DIR = 'C:\\Users\\tester\\fnm'
+    process.env.Path = 'C:\\Windows\\System32'
+
+    patchPackagedProcessPath()
+
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(homedirMock).toHaveBeenCalledTimes(1)
+    const segments = (process.env.Path ?? '').split(';')
+    const system32 = segments.indexOf('C:\\Windows\\System32')
+    const fnmDefault = join('C:\\Users\\tester\\fnm', 'aliases', 'default')
+    // Shims still lead PATH...
+    expect(segments.indexOf(join('C:\\Users\\tester', '.volta', 'bin')), '.volta/bin').toBeLessThan(
+      system32
+    )
+    // ...while the fnm default only backfills, so it stays behind the inherited system Node.
+    expect(segments.indexOf(fnmDefault), fnmDefault).toBeGreaterThan(system32)
   })
 })

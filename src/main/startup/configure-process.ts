@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { getVersionManagerBinPaths } from '../codex-cli/command'
-import { isWindowsFnmDefaultAliasDir } from '../../shared/fnm-default-alias-dirs'
+import { getFnmDefaultAliasDirectories } from '../../shared/fnm-default-alias-dirs'
 import { getMainE2EConfig } from '../e2e-config'
 import { DISABLED_CHROMIUM_FEATURES } from './disabled-chromium-features'
 import { readHttp1CompatibilityMarker } from './http1-compatibility-marker'
@@ -186,8 +186,14 @@ export function patchPackagedProcessPath(): void {
   // Why the guard: with no usable home this call returns `.volta/bin`-style relative entries, and these lead PATH, so the exposure is worst here.
   // Why the explicit homePath: keeps this list and the `~` seed on one answer, and skips the unguarded homedir() call inside.
   if (versionManagerHome) {
+    // fnm's default alias is the one shim that must trail an inherited PATH, and only on win32; classified from the guarded home.
+    const fnmDefaultAliasDirs = new Set(
+      process.platform === 'win32'
+        ? getFnmDefaultAliasDirectories(process.platform, versionManagerHome)
+        : []
+    )
     for (const path of getVersionManagerBinPaths({ homePath: versionManagerHome })) {
-      if (isWindowsFnmDefaultAliasDir(path)) {
+      if (fnmDefaultAliasDirs.has(path)) {
         appendPaths.push(path)
       } else if (!isGenericUserBinDir(path)) {
         prependPaths.push(path)
