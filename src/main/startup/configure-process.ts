@@ -2,7 +2,7 @@ import { app } from 'electron'
 import { quitProcess } from './process-quit-request'
 import { mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, posix, resolve, win32 } from 'node:path'
+import { join, resolve } from 'node:path'
 import { getVersionManagerBinPaths } from '../codex-cli/command'
 import { isWindowsFnmDefaultAliasDir } from '../../shared/fnm-default-alias-dirs'
 import { getMainE2EConfig } from '../e2e-config'
@@ -11,6 +11,7 @@ import { readHttp1CompatibilityMarker } from './http1-compatibility-marker'
 import { checkServeUserDataPath } from './serve-user-data-path-guard'
 import { stampRuntimeSourceEnv } from '../../shared/runtime-source-env'
 import { isLinuxWaylandSession } from '../../shared/linux-wayland-session'
+import { resolveAbsoluteDirOverride } from '../../shared/absolute-dir-override'
 import {
   hasMissingProfileStateDatabaseWithRetainedAuthority,
   readActiveProfileId,
@@ -130,12 +131,6 @@ function resolveAccountHome(): string | undefined {
   }
 }
 
-/** A relative `join(home, …)` seed entry resolves against each spawn's cwd, so a worktree planting `.local/bin/gh` gets executed (CWE-426). Host-specific isAbsolute: win32 reads `C:\Users\…` as relative under posix. */
-function usableSeedHome(candidate: string): string {
-  const isAbsolutePath = process.platform === 'win32' ? win32.isAbsolute : posix.isAbsolute
-  return isAbsolutePath(candidate) ? candidate : ''
-}
-
 export function patchPackagedProcessPath(): void {
   if (!app.isPackaged) {
     return
@@ -148,9 +143,10 @@ export function patchPackagedProcessPath(): void {
   }
 
   const inheritedHome = process.env.HOME ?? ''
-  const home = usableSeedHome(inheritedHome)
+  // Absolute only: a relative seed entry resolves against each spawn's cwd, so a worktree could supply `.local/bin/gh` (#13082 rule).
+  const home = resolveAbsoluteDirOverride(inheritedHome, '')
   // Windows has USERPROFILE but no usable HOME, so the version-manager home falls back to the account directory.
-  const versionManagerHome = usableSeedHome(accountHome ?? inheritedHome)
+  const versionManagerHome = resolveAbsoluteDirOverride(accountHome ?? inheritedHome, '')
   // #18234: append generic user bins; prepending ~/.local/bin made a gh/mise wrapper recursively shadow system gh. Shell hydration owns user ordering.
   const isGenericUserBinDir = (path: string): boolean =>
     process.platform !== 'win32' &&
