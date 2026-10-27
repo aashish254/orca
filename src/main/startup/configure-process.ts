@@ -131,6 +131,7 @@ function resolveAccountHome(): string | undefined {
   }
 }
 
+/** Repair a packaged launch's inherited environment: GUI launches reach here with no HOME and an empty or partial PATH, so every `~` and package-manager bin a CLI needs is absent. */
 export function patchPackagedProcessPath(): void {
   if (!app.isPackaged) {
     return
