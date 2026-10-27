@@ -283,18 +283,19 @@ describe('patchPackagedProcessPath packaged environment', () => {
   })
 
   // A relative PATH entry resolves against each spawn's cwd, so an unresolvable home let an untrusted worktree plant `.local/bin/gh` (CWE-426).
-  // The three shapes reach the same guard by different routes: throw and empty both end at an empty account home, a relative HOME feeds the appended user bins instead.
+  // The shapes reach the guards by different routes: throw and empty empty the account home, a relative HOME feeds the appended user bins, and both together feed the prepended shims.
   it.each([
     ['a lookup that throws', 'throw'],
     ['a lookup that answers an empty string', 'empty'],
-    ['a HOME that is not absolute', 'relative']
+    ['a HOME that is not absolute', 'relative'],
+    ['a HOME that is not absolute and no account entry', 'relative-no-account']
   ] as const)(
     'seeds no PATH entry that a spawn could resolve against its own working directory, on %s',
     async (_label, mode) => {
       const { app } = await import('electron')
       const { patchPackagedProcessPath } = await import('./configure-process')
       vi.spyOn(console, 'warn').mockImplementation(() => {})
-      if (mode === 'throw') {
+      if (mode === 'throw' || mode === 'relative-no-account') {
         homedirMock.mockImplementation(() => {
           throw Object.assign(new Error('uv_os_homedir returned ENOENT'), {
             code: 'ERR_SYSTEM_ERROR'
@@ -309,7 +310,7 @@ describe('patchPackagedProcessPath packaged environment', () => {
 
       setPlatform('linux')
       Object.defineProperty(app, 'isPackaged', { configurable: true, value: true })
-      if (mode === 'relative') {
+      if (mode === 'relative' || mode === 'relative-no-account') {
         process.env.HOME = '.relative-home'
       } else {
         delete process.env.HOME
@@ -328,6 +329,35 @@ describe('patchPackagedProcessPath packaged environment', () => {
       expect(segments).toContain('/bin')
     }
   )
+
+  it('seeds the version-manager shims from an inherited absolute HOME when the account lookup throws', async () => {
+    const { app } = await import('electron')
+    const { patchPackagedProcessPath } = await import('./configure-process')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    // The repair made the first lookup total; threading `homePath` is what keeps the second one, inside getVersionManagerBinPaths, from running at all.
+    homedirMock.mockImplementation(() => {
+      throw Object.assign(new Error('uv_os_homedir returned ENOENT'), { code: 'ERR_SYSTEM_ERROR' })
+    })
+
+    setPlatform('linux')
+    Object.defineProperty(app, 'isPackaged', { configurable: true, value: true })
+    process.env.HOME = '/home/tester'
+    delete process.env.PATH
+
+    patchPackagedProcessPath()
+
+    expect(process.env.HOME).toBe('/home/tester')
+    expect(warn).toHaveBeenCalledTimes(1)
+    const segments = (process.env.PATH ?? '').split(':')
+    const firstShim = segments.indexOf(join('/home/tester', '.volta', 'bin'))
+    expect(
+      firstShim,
+      'shims come from the inherited HOME, not the account lookup'
+    ).toBeGreaterThanOrEqual(0)
+    for (const systemDir of ['/usr/bin', '/bin']) {
+      expect(segments.indexOf(systemDir), systemDir).toBeGreaterThan(firstShim)
+    }
+  })
 
   it('uses the Windows account directory for the user bins without writing POSIX HOME', async () => {
     const { app } = await import('electron')
